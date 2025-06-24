@@ -1,0 +1,460 @@
+// Pick & Guess Game in ARM Assembly 
+.data
+
+HEX_BASE:   .word 0xFF200020       // HEX0–HEX3 display base address
+KEY_BASE:   .word 0xFF200050       // Push Button base address
+GuessCounter: .word 5                       // Number of allowed attempts for Player 2
+
+ // 7-segment display codes for digits 0–9 and “-”
+HEXTABLE:
+    .word 0b00111111       // 0
+    .word 0b00000110      // 1
+    .word 0b01011011      // 2
+    .word 0b01001111      // 3
+    .word 0b01100110      // 4
+    .word 0b01101101      // 5
+    .word 0b01111101      // 6
+    .word 0b00000111      // 7
+    .word 0b01111111       //  8
+    .word 0b01101111      //  9
+    .word 0b01000000     // “-” To show wrong digit guesses
+
+ // Message to display on win
+WIN_MSG:
+    .word 0b00110111      // “N”
+    .word 0b00000110     // “I”
+    .word 0b00111110      // “U”
+    .word 0b00111110      // “U” ,  “UU” represents “W”
+
+ // Message to display on loss
+LOSS_MSG:
+    .word 0b01101101     // “S”
+    .word 0b01101101     // “S”
+    .word 0b00111111      // “O”	
+    .word 0b00111000     // “L”
+
+// "PLAY" message shown both at the start and end of the game for restart
+PLAY_MSG:
+    .word 0b01101110       // "Y"
+    .word 0b01110111       // "A"
+    .word 0b00111000       // "L"
+    .word 0b01110011       // "P"
+
+.text
+.global _start
+
+_start:
+          // Show "PLAY" on startup screen
+	BL display_play_message
+
+wait_start_press:
+    LDR R2, =0xFF200050
+    LDR R7, [R2]                        // Read button states
+    TST R7, #8                           // Check if KEY3 is pressed
+    BEQ wait_start_press           // Loop until pressed
+    
+   // Wait for key3 release
+wait_start_release:
+    LDR R2, =0xFF200050        // Load push button base address
+    LDR R7, [R2]               // Read the current button states
+    TST R7, #8                 // Test if KEY3 is still pressed (bit 3)
+    BNE wait_start_release     // If still pressed, keep waiting (debounce)
+
+    // Initialize game state variables 
+    LDR R1, =0xFF200020        // Load HEX display base address into R1
+    LDR R2, =0xFF200050        // Load push button base address into R2
+    LDR R3, =HEXTABLE          // Load address of 7-segment digit encodings
+
+    // Clear current input digits (used during number entry)
+    MOV R4, #0                 // Ones digit input
+    MOV R5, #0                 // Tens digit input
+    MOV R6, #0                 // Hundreds digit input
+
+    // Clear Player 1's secret code storage
+    MOV R8, #0                 // Ones digit of secret code
+    MOV R9, #0                 // Tens digit of secret code
+    MOV R10, #0                // Hundreds digit of secret code
+
+    // Display "000" at the start of input phase
+    BL update_display          // Update HEX display to reflect cleared digits
+
+    // Begin Player 1 number selection loop
+    B main_loop
+
+
+// main_loop: Player 1 selects secret number
+main_loop:
+    LDR R2, =0xFF200050        // Load base address of push button input
+    LDR R7, [R2]               // Read current button states
+
+    TST R7, #1                 // Check if KEY0 (bit 0) is pressed (for ones digit)
+    BEQ p1_check_key1         // If not, check next key
+    ADD R4, R4, #1            // Increment ones digit
+    CMP R4, #10               // If R4 >= 10
+    MOVGE R4, #0              // Wrap it around to 0
+    B update_and_wait_p1      // Update display and wait for key release
+
+p1_check_key1:
+    TST R7, #2                 // Check if KEY1 (bit 1) is pressed (for tens digit)
+    BEQ p1_check_key2
+    ADD R5, R5, #1            // Increment tens digit
+    CMP R5, #10
+    MOVGE R5, #0              // Wrap to 0 if it exceeds 9
+    B update_and_wait_p1
+
+p1_check_key2:
+    TST R7, #4                 // Check if KEY2 (bit 2) is pressed (for hundreds digit)
+    BEQ p1_check_key3
+    ADD R6, R6, #1            // Increment hundreds digit
+    CMP R6, #10
+    MOVGE R6, #0              // Wrap to 0 if needed
+    B update_and_wait_p1
+
+p1_check_key3:          
+    TST R7, #8                 // Check if KEY3 (bit 3) is pressed to confirm number
+    BEQ main_loop             // If not pressed, stay in input loop
+
+    // KEY3 pressed – save the current input as Player 1's secret number
+    MOV R8, R4                // Save ones digit
+    MOV R9, R5                // Save tens digit
+    MOV R10, R6               // Save hundreds digit
+
+    // Reset current input (R4–R6) to 0 for Player 2's turn
+    MOV R4, #0
+    MOV R5, #0
+    MOV R6, #0
+
+    BL update_display         // Display 000 to start Player 2's input phase
+
+wait_p1_key3_release:
+    LDR R2, =0xFF200050        // Load push button base
+    LDR R7, [R2]                        // Read button states
+    TST R7, #8
+    BNE wait_p1_key3_release       // Wait for KEY3 release
+
+// Player 2 Loop: Player 2 enters a guess using keys
+player2_loop:
+    LDR R2, =0xFF200050         // Load push button base address
+    LDR R7, [R2]                // Read current state of pushbuttons
+
+    TST R7, #1                  // Check if KEY0 (bit 0) is pressed (ones digit)
+    BEQ p2_check_key1          // If not pressed, check next key
+    ADD R4, R4, #1             // Increment ones digit (R4)
+    CMP R4, #10                // If R4 reaches 10
+    MOVGE R4, #0               // Wrap it back to 0
+    B update_and_wait_p2       // Update display and wait for key release
+
+p2_check_key1:
+    TST R7, #2                  // Check if KEY1 (bit 1) is pressed (tens digit)
+    BEQ p2_check_key2
+    ADD R5, R5, #1             // Increment tens digit (R5)
+    CMP R5, #10
+    MOVGE R5, #0               // Wrap to 0 after 9
+    B update_and_wait_p2
+
+p2_check_key2:
+    TST R7, #4                  // Check if KEY2 (bit 2) is pressed (hundreds digit)
+    BEQ p2_check_key3
+    ADD R6, R6, #1             // Increment hundreds digit (R6)
+    CMP R6, #10
+    MOVGE R6, #0               // Wrap to 0 after 9
+    B update_and_wait_p2
+
+p2_check_key3:
+    TST R7, #8                         // Check if KEY3 (bit 3) is pressed to confirm guess
+    BEQ player2_loop                   // If not pressed, stay in guessing loop
+
+wait_p2_key3_release:
+    LDR R2, =0xFF200050                // Load push button base address again
+    LDR R7, [R2]                       // Read current button state
+    TST R7, #8                         // Wait for KEY3 release (debounce)
+    BNE wait_p2_key3_release
+
+    MOV R12, #0                        // Reset match counter (R12 = number of correct digits)
+
+    // Display '-' for incorrect digits first
+    LDR R1, =0xFF200020                // Load HEX display base address
+    LDR R2, =HEXTABLE                  // Load digit-to-7seg encoding table
+
+    // Check ones digit (R4 vs R8)
+    CMP R4, R8                         // Compare Player 2's guess with Player 1's ones digit
+    MOVEQ R0, R4                       // If equal, keep the digit
+    ADDEQ R12, R12, #1                // Count it as correct
+    MOVNE R0, #10                      // If not equal, show '-' (index 10 in HEXTABLE)
+
+    // Check tens digit (R5 vs R9)
+    CMP R5, R9
+    MOVEQ R3, R5
+    ADDEQ R12, R12, #1
+    MOVNE R3, #10                      // Show '-' if incorrect
+
+    // Check hundreds digit (R6 vs R10)
+    CMP R6, R10
+    MOVEQ R7, R6
+    ADDEQ R12, R12, #1
+    MOVNE R7, #10                      // Show '-' if incorrect
+
+    // Convert guessed digits or '-' to display codes
+    LDR R0, [R2, R0, LSL #2]           // Ones position
+    LDR R3, [R2, R3, LSL #2]           // Tens
+    LDR R7, [R2, R7, LSL #2]           // Hundreds
+
+    // Position digits on HEX0–HEX2
+    LSL R3, R3, #8                     // Shift tens to HEX1
+    LSL R7, R7, #16                    // Shift hundreds to HEX2
+
+    ORR R0, R0, R3                     // Combine ones and tens
+    ORR R0, R0, R7                     // Combine with hundreds
+
+    STR R0, [R1]                       // Display guessed digits with '-' where wrong
+
+    // Brief delay to show incorrect digits
+    BL delay_wrong_guess
+
+    // Prepare second display with 0s instead of '-' for incorrect digits
+    MOV R12, #0                        // Reset match counter again
+
+    // Ones digit
+    CMP R4, R8
+    MOVEQ R0, R4                       // Keep correct digit
+    ADDEQ R12, R12, #1
+    MOVNE R0, #0                       // Show 0 if wrong
+    MOVNE R4, #0                       // Also reset input to 0
+
+    // Tens digit
+    CMP R5, R9
+    MOVEQ R3, R5
+    ADDEQ R12, R12, #1
+    MOVNE R3, #0
+    MOVNE R5, #0
+
+    // Hundreds digit
+    CMP R6, R10
+    MOVEQ R7, R6
+    ADDEQ R12, R12, #1
+    MOVNE R7, #0
+    MOVNE R6, #0
+
+    // If all 3 digits are correct, show win message
+    CMP R12, #3
+    BEQ display_win
+
+    // Convert corrected values to display codes
+    LDR R0, [R2, R0, LSL #2]
+    LDR R3, [R2, R3, LSL #2]
+    LDR R7, [R2, R7, LSL #2]
+
+    // Position for display
+    LSL R3, R3, #8
+    LSL R7, R7, #16
+
+    ORR R0, R0, R3
+    ORR R0, R0, R7
+
+    STR R0, [R1]                       // Show corrected guess on HEX display
+
+    // Go check how many attempts remain
+    B counter_check
+
+delay_wrong_guess:
+    LDR R0, =5000000          // Load a large value into R0 for delay countdown
+
+delay_wg_loop:
+    SUBS R0, R0, #1           // Subtract 1 from R0 and update condition flags
+    BNE delay_wg_loop         // If R0 is not zero, loop again (creates a time delay)
+    BX LR                     // Return from subroutine when delay is over
+
+counter_check:
+    LDR R0, =GuessCounter     // Load the address of the guess counter variable
+    LDR R11, [R0]             // Load the current number of remaining attempts into R11
+    SUB R11, R11, #1          // Decrement the attempt counter by 1
+    STR R11, [R0]             // Store the updated attempt count back to memory
+    CMP R11, #0               // Check if Player 2 has used all attempts
+    BEQ display_loss          // If no attempts left, branch to loss message
+    B player2_loop            // Otherwise, allow another guess (loop back)
+
+
+	
+update_and_wait_p1:
+    BL update_display           // Call subroutine to update 7-segment display with current digits
+
+wait_release_p1:
+    LDR R2, =0xFF200050         // Load push button base address
+    LDR R7, [R2]                // Read current state of all pushbuttons
+    TST R7, #7                  // Test if any of KEY0, KEY1, or KEY2 are still pressed (bits 0–2)
+    BNE wait_release_p1         // If any are still pressed, wait (debouncing)
+    B main_loop                 // Once released, go back to Player 1 input loop
+
+update_and_wait_p2:
+    BL update_display           // Call subroutine to update 7-segment display with Player 2’s guess
+
+wait_release_p2:
+    LDR R2, =0xFF200050         // Load pushbutton base address
+    LDR R7, [R2]                // Read current state of all pushbuttons
+    TST R7, #7                  // Test if any of KEY0, KEY1, or KEY2 are still pressed
+    BNE wait_release_p2         // If any are still pressed, wait
+    B player2_loop              // Once released, return to Player 2’s guess input loop
+
+
+display_win:
+    PUSH {R0-R5, LR}            // Save registers R0–R5 and return address to stack
+
+    LDR R1, =0xFF200020         // Load HEX display base address
+    LDR R2, =WIN_MSG            // Load address of WIN message data ("WIN" = "UUIN")
+
+    LDR R0, [R2]                // Load first character (N)
+    LDR R3, [R2, #4]            // Load second character (I)
+    LDR R4, [R2, #8]            // Load third character (U)
+    LDR R5, [R2, #12]           // Load fourth character (U)
+
+    LSL R3, R3, #8              // Shift 2nd char left by 8 bits (HEX1 position)
+    LSL R4, R4, #16             // Shift 3rd char left by 16 bits (HEX2 position)
+    LSL R5, R5, #24             // Shift 4th char left by 24 bits (HEX3 position)
+
+    ORR R0, R0, R3              // Combine N and I
+    ORR R0, R0, R4              // Combine with U
+    ORR R0, R0, R5              // Combine with U again
+
+    STR R0, [R1]                // Write combined value to HEX display
+
+    BL short_delay              // Show message for a while
+    BL display_play_message     // Then show "PLAY" message to allow restart
+
+    POP {R0-R5, LR}             // Restore saved registers
+    B wait_restart              // Wait for KEY3 press to restart the game
+
+display_loss:
+    PUSH {R0-R5, LR}            // Save working registers and return address
+
+    LDR R1, =0xFF200020         // Load base address of HEX display
+    LDR R2, =LOSS_MSG           // Load address of LOSS message data ("LOSS”)
+
+    LDR R0, [R2]                // Load first character (S)
+    LDR R3, [R2, #4]            // Load second character (S)
+    LDR R4, [R2, #8]            // Load third character (O)
+    LDR R5, [R2, #12]           // Load fourth character (L)
+
+    LSL R3, R3, #8              // Shift 2nd char left by 8 bits (HEX1 position)
+    LSL R4, R4, #16             // Shift 3rd char left by 16 bits (HEX2 position)
+    LSL R5, R5, #24             // Shift 4th char left by 24 bits (HEX3 position)
+
+    ORR R0, R0, R3              // Combine S and S
+    ORR R0, R0, R4              // Combine with O
+    ORR R0, R0, R5              // Combine with L
+
+    STR R0, [R1]                // Output the full LOSS message to the HEX display
+
+    BL short_delay              // Wait briefly so player can read the LOSS message
+    BL display_p1_number        // Show the correct secret number from Player 1
+    BL short_delay              // Wait again before showing PLAY message
+    BL display_play_message     // Display “PLAY” prompt to indicate restart is possible
+
+    POP {R0-R5, LR}             // Restore saved registers
+    B wait_restart              // Go to routine that waits for restart key press
+
+wait_restart:
+wait_restart_press:
+    LDR R2, =0xFF200050         // Load push button base address
+    LDR R7, [R2]                // Read button states
+    TST R7, #8                  // Check if KEY3 is pressed
+    BEQ wait_restart_press      // Loop until KEY3 is pressed
+
+wait_restart_release:
+    LDR R2, =0xFF200050         // Load push button base again
+    LDR R7, [R2]                // Read button states
+    TST R7, #8                  // Check if KEY3 is still pressed
+    BNE wait_restart_release    // Wait until KEY3 is released
+
+    // Reset all digit registers (input and secret code)
+    MOV R4, #0                  // Ones digit (input)
+    MOV R5, #0                  // Tens digit (input)
+    MOV R6, #0                  // Hundreds digit (input)
+    MOV R8, #0                  // Ones digit (secret)
+    MOV R9, #0                  // Tens digit (secret)
+    MOV R10, #0                 // Hundreds digit (secret)
+
+    // Reset guess counter back to 5
+    LDR R0, =GuessCounter       // Load address of guess counter
+    MOV R11, #5                 // Set attempts back to 5
+    STR R11, [R0]               // Store it in memory
+
+    // Clear display and restart game
+    BL update_display           // Show 000 again
+    B main_loop                 // Go back to Player 1 input phase
+
+update_display:
+    PUSH {R0-R3, LR}                  // Save registers and link register before subroutine work
+
+    LDR R1, =0xFF200020               // Load address of HEX display
+    LDR R2, =HEXTABLE                 // Load address of 7-segment encoding table
+
+    LDR R0, [R2, R4, LSL #2]          // Load encoded value for ones digit (R4)
+    LDR R3, [R2, R5, LSL #2]          // Load encoded value for tens digit (R5)
+    LDR R2, [R2, R6, LSL #2]          // Load encoded value for hundreds digit (R6)
+
+    LSL R3, R3, #8                    // Shift tens digit to HEX1 position
+    LSL R2, R2, #16                   // Shift hundreds digit to HEX2 position
+
+    ORR R0, R0, R3                    // Combine ones and tens
+    ORR R0, R0, R2                    // Combine with hundreds
+
+    STR R0, [R1]                      // Output combined value to HEX display
+
+    POP {R0-R3, LR}                   // Restore saved registers
+    BX LR                             // Return from subroutine
+
+short_delay:
+    LDR R0, =15000000                 // Load a large value to create a visible time delay
+
+delay_loop:
+    SUBS R0, R0, #1                   // Subtract 1 from R0 and update flags
+    BNE delay_loop                    // Loop until R0 reaches zero
+    BX LR                             // Return from subroutine
+
+display_p1_number:
+    PUSH {R0-R3, LR}                 // Save working registers and link register
+
+    LDR R1, =0xFF200020              // Load address of the HEX display
+    LDR R2, =HEXTABLE                // Load address of 7-segment encoding table
+
+    LDR R0, [R2, R8, LSL #2]         // Load encoded value for Player 1's ones digit (R8)
+    LDR R3, [R2, R9, LSL #2]         // Load encoded value for Player 1's tens digit (R9)
+    LDR R2, [R2, R10, LSL #2]        // Load encoded value for Player 1's hundreds digit (R10)
+
+    LSL R3, R3, #8                   // Shift tens digit left to HEX1 position
+    LSL R2, R2, #16                  // Shift hundreds digit left to HEX2 position
+
+    ORR R0, R0, R3                   // Combine ones and tens digit values
+    ORR R0, R0, R2                   // Combine with hundreds digit value
+
+    STR R0, [R1]                     // Display the full 3-digit number on the HEX display
+
+    POP {R0-R3, LR}                  // Restore saved registers
+    BX LR                            // Return from subroutine
+
+display_play_message:
+    PUSH {R0-R5, LR}            // Save working registers and return address
+
+    LDR R1, =0xFF200020         // Load address of the HEX display
+    LDR R2, =PLAY_MSG           // Load address of the "PLAY" message data
+
+    LDR R0, [R2]                // Load first character (Y)
+    LDR R3, [R2, #4]            // Load second character (A)
+    LDR R4, [R2, #8]            // Load third character (L)
+    LDR R5, [R2, #12]           // Load fourth character (P)
+
+    LSL R3, R3, #8              // Shift second character to HEX1 position
+    LSL R4, R4, #16             // Shift third character to HEX2 position
+    LSL R5, R5, #24             // Shift fourth character to HEX3 position
+
+    ORR R0, R0, R3              // Combine first and second characters
+    ORR R0, R0, R4              // Combine with third character
+    ORR R0, R0, R5              // Combine with fourth character
+
+    STR R0, [R1]                // Display the combined 4-character message on HEX display
+
+    POP {R0-R5, LR}             // Restore saved registers
+    BX LR                       // Return from subroutine
+
+end:
+    B end
